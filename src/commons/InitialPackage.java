@@ -3,6 +3,8 @@ package commons;
 import java.io.Serializable;
 
 public class InitialPackage implements Serializable {
+    public static final int ID = -1;
+
     public long getFileSize() {
         return fileSize;
     }
@@ -16,17 +18,20 @@ public class InitialPackage implements Serializable {
     }
 
     private final long fileSize;
-    private final String fileName;
     private final int packageSize;
+    private final String fileName;
 
-    public InitialPackage(long fileSize, String fileName, int packageSize) {
-        this.fileSize = fileSize;
+    public InitialPackage(String fileName, long fileSize, int packageSize) {
         this.fileName = fileName;
+        this.fileSize = fileSize;
         this.packageSize = packageSize;
     }
 
     @Override
     public String toString() {
-        return "File '" + fileName + "', size: " + fileSize + ", split into packages of size " + packageSize;
+        return "File '" + fileName
+                + "', size: " + fileSize
+                + ", split into " + ((fileSize - 1) / packageSize + 1)
+                + " packages of size " + packageSize;
     }
 }
