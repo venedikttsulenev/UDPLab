@@ -1,6 +1,8 @@
 package client;
 
 import commons.*;
+import commons.Package;
+import sun.rmi.runtime.Log;
 
 import java.io.*;
 import java.net.DatagramPacket;
@@ -9,134 +11,152 @@ import java.net.InetSocketAddress;
 import java.util.Timer;
 import java.util.TimerTask;
 
-public class FileSender implements FileConsumer {
-    private volatile boolean eofReached = false;
+public class FileSender implements AcknowledgementReceiver.Listener, Runnable {
+    private final Object slidingWindowLock = new Object();
     private final DatagramSocket socket;
     private final InetSocketAddress receiverAddress;
     private final Timer timer;
+    private final CyclicBuffer<PartOfFilePackage> slidingWindow;
+    private final int packSize;
+    private final long timeout;
+    private final File file;
+    private final int totalPackages;
+    private final AcknowledgementReceiver acknowledgementReceiver;
+    private final FileReader fileReader;
+    private final Channel<byte[]> inputChannel;
+    private volatile int packagesDelivered;
 
-    private void sendPartOfFile(PartOfFilePackage pack) throws IOException {
-        byte[] packBytes = pack.getSerialized();
-        DatagramPacket packet = new DatagramPacket(packBytes, packBytes.length, receiverAddress);
-        socket.send(packet);
+    public FileSender(File file, int bufferSize, int windowSize, int packSize, DatagramSocket socket, InetSocketAddress receiverAddress, long timeout) throws IOException {
+        this.socket = socket;
+        this.receiverAddress = receiverAddress;
+        this.slidingWindow = new CyclicBuffer<>(new PartOfFilePackage[windowSize + 1]);
+        this.timer = new Timer();
+        this.packSize = packSize;
+        this.timeout = timeout;
+        this.file = file;
+        this.totalPackages = (int) (file.length() - 1) / packSize + 1;
+        this.acknowledgementReceiver = new AcknowledgementReceiver(socket, this);
+        this.inputChannel = new Channel<>(bufferSize / packSize);
+        this.fileReader = new FileReader(new FileInputStream(file), packSize, inputChannel);
     }
 
-    private class ResendPacketTask extends TimerTask {
-        private final PartOfFilePackage pack;
+    private class PurgeTimerTask extends TimerTask {
+        private final Timer timer;
 
-        public ResendPacketTask(PartOfFilePackage pack) {
-            this.pack = pack;
+        private PurgeTimerTask(Timer timer) {
+            this.timer = timer;
         }
 
         @Override
         public void run() {
-            if (!pack.isDelivered()) {
-                try {
-                    sendPartOfFile(pack);
-                    System.out.println("> Timeout for package #" + pack.getPackageNumber() + ", resending");
-                } catch (IOException e) {
-                    System.out.println(e.getMessage());
-                }
-            } else
-                this.cancel();
+            timer.purge();
         }
     }
 
-    public FileSender(File file, long bufferSize, int windowSize, int packSize, DatagramSocket socket, InetSocketAddress receiverAddress, long timeout) throws IOException {
-        this.socket = socket;
-        this.receiverAddress = receiverAddress;
-        CyclicBuffer<PartOfFilePackage> slidingWindow = new CyclicBuffer<>(new PartOfFilePackage[windowSize + 1]);
-        this.timer = new Timer();
-        try {
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            ObjectOutput oo = new ObjectOutputStream(bos);
-            InitialPackage initialPackage = new InitialPackage(file.getName(), file.length(), packSize);
-            int totalPackages = (int) (file.length() - 1 / packSize + 1);
-            oo.writeObject(initialPackage);
-            oo.flush();
-            DatagramPacket response = new DatagramPacket(new byte[4], 4);
-            socket.send(new DatagramPacket(bos.toByteArray(), bos.toByteArray().length, receiverAddress));
-            socket.receive(response);
-            boolean initialPackDelivered = (InitialPackage.ID == BytesTo.integer(response.getData()));
-            while (!initialPackDelivered) {
-                socket.receive(response);
-                int id = BytesTo.integer(response.getData());
-                initialPackDelivered = (id == InitialPackage.ID);
-                System.out.println("> Initial package delivered");
+    private class ResendPacketTask extends TimerTask {
+        private final Package pack;
+        private final DatagramPacket packet;
+
+        private ResendPacketTask(Package pack, DatagramPacket packet) {
+            this.pack = pack;
+            this.packet = packet;
+        }
+
+        @Override
+        public void run() {
+            if (pack.isDelivered())
+                this.cancel();
+            else {
+                Logger.getInstance().packageTimedOut(pack.getPackageNumber());
+                try {
+                    socket.send(packet);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
             }
-
-            new Thread(() -> { /* Acknowledgement receiving thread */
-                int packagesDelivered = 0;
-                while (packagesDelivered < totalPackages) {
-                    try {
-                        socket.receive(response);
-                        int id = BytesTo.integer(response.getData());
-                        if (!slidingWindow.isEmpty())
-                            for (PartOfFilePackage p : slidingWindow) {
-                                if (p.getPackageNumber() == id) {
-                                    ++packagesDelivered;
-                                    p.onDeliver();
-                                    System.out.println("> Package #" + id + " delivered");
-                                    break;
-                                }
-                            }
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }
-                System.out.println("File successfully transferred");
-            }).start();
-
-            new Thread(() -> { /* Packet sending thread */
-                try {
-                    while (!eofReached || !slidingWindow.isEmpty()) { /* When EOF is reached, buffer may be not empty */
-                        PartOfFilePackage pack = slidingWindow.first();
-                        while (pack.isDelivered()) {  /* Remove delivered packages from head of buffer */
-                            slidingWindow.take();
-                            pack = slidingWindow.first();
-                        }
-                        for (PartOfFilePackage p : slidingWindow) {
-                            if (!p.isSent()) {
-                                try {
-                                    sendPartOfFile(p);
-                                    p.onSend();
-                                    System.out.println("> Package #" + p.getPackageNumber() + " sent");
-                                    timer.schedule(new ResendPacketTask(p), timeout, timeout);
-                                } catch (IOException e) {
-                                    e.printStackTrace();
-                                }
-                            }
-                        }
-                    }
-                    System.out.println("Packet sending thread finished");
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-            }).start();
-
-            CyclicBuffer<PartOfFilePackage> fileBuffer = new CyclicBuffer<>(
-                    new PartOfFilePackage[(int) ((bufferSize - 1) / packSize + 1)]
-            );
-
-            new Thread(() -> { /* From buffer to window */
-                try {
-                    while (!eofReached || !fileBuffer.isEmpty())
-                        slidingWindow.put(fileBuffer.take());
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-            }).start();
-
-            new FileReader(new FileInputStream(file), fileBuffer, packSize, this); /* Starts implicitly */
-        } catch (IOException e) {
-            e.printStackTrace();
         }
     }
 
     @Override
-    public void onEOFReached() {
-        if (eofReached)
-            throw new IllegalStateException("Wut?! EOF reached 2 times.");
-        eofReached = true;
+    public void run() {
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            ObjectOutput oo = new ObjectOutputStream(bos);
+            InitialPackage initialPackage = new InitialPackage(file.getName(), file.length(), packSize);
+            oo.writeObject(initialPackage);
+            oo.flush();
+            DatagramPacket initialPacket = new DatagramPacket(bos.toByteArray(), bos.toByteArray().length, receiverAddress);
+            DatagramPacket response = new DatagramPacket(new byte[4], 4);
+            socket.send(initialPacket);
+            timer.schedule(new ResendPacketTask(initialPackage, initialPacket), timeout, timeout);
+            boolean initialPackDelivered = false;
+            while (!initialPackDelivered) {
+                socket.receive(response);
+                int id = BytesTo.integer(response.getData());
+                initialPackDelivered = (id == InitialPackage.ID);
+            }
+            initialPackage.onDeliver();
+            Logger.getInstance().packageDelivered(InitialPackage.ID);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        timer.schedule(new PurgeTimerTask(timer), 300, 300); /* Remove cancelled tasks every 300 ms */
+        packagesDelivered = 0;
+        new Thread(acknowledgementReceiver).start();
+        new Thread(fileReader).start();
+
+        int packagesSent = 0;
+        try {
+            int packNum = -1;
+            while (packagesSent < totalPackages) {
+                synchronized (slidingWindowLock) {
+                    for (int i = slidingWindow.size(); packagesSent < totalPackages && i < slidingWindow.capacity(); ++i) {
+                        try {
+                            PartOfFilePackage p = new PartOfFilePackage(++packNum, inputChannel.take());
+                            slidingWindow.put(p);
+                            byte[] packBytes = p.getSerialized();
+                            DatagramPacket packet = new DatagramPacket(packBytes, packBytes.length, receiverAddress);
+                            socket.send(packet);
+                            timer.schedule(new ResendPacketTask(p, packet), timeout, timeout);
+                            ++packagesSent;
+                            Logger.getInstance().packageSent(packNum);
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                }
+            }
+            Logger.getInstance().allPackagesSent();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        Logger.getInstance().fileSenderFinished();
+    }
+
+    @Override
+    public void onAcknowledgementReceived(int packageNumber) {
+        synchronized (slidingWindowLock) {
+            for (PartOfFilePackage p : slidingWindow)
+                if (packageNumber == p.getPackageNumber()) {
+                    p.onDeliver();
+                    ++packagesDelivered;
+                    Logger.getInstance().packageDelivered(packageNumber);
+
+                    /* Remove delivered packages from head of buffer */
+                    PartOfFilePackage pack = slidingWindow.peek();
+                    while (pack != null && pack.isDelivered()) {
+                        slidingWindow.poll();
+                        pack = slidingWindow.peek();
+                    }
+                    if (packagesDelivered == totalPackages) {
+                        timer.cancel();
+                        timer.purge();
+                        acknowledgementReceiver.stop();
+                        Logger.getInstance().allPackagesDelivered();
+                    }
+                    return;
+                }
+        }
     }
 }

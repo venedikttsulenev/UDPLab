@@ -46,13 +46,14 @@ public class FileReceiver implements Runnable {
                 try {
                     socket.receive(packet);
                     PartOfFilePackage pack = PartOfFilePackage.getDeserialized(packet.getData(), 0, packet.getLength());
-                    System.out.println("Received package #" + pack.getPackageNumber());
-                    packsToWrite.add(pack);
-                    ++receivedPacks;
-                    socket.send(new DatagramPacket(IntTo.bytes(pack.getPackageNumber()), 4, address)); /* Send confirmation */
-                    while (!packsToWrite.isEmpty() && packsToWrite.peek().getPackageNumber() == lastWrittenPackID + 1) {
-                        fOutput.write(packsToWrite.remove().getData());
-                        ++lastWrittenPackID;
+                    if (pack.getPackageNumber() > lastWrittenPackID) {
+                        packsToWrite.add(pack);
+                        ++receivedPacks;
+                        socket.send(new DatagramPacket(IntTo.bytes(pack.getPackageNumber()), 4, address)); /* Send confirmation */
+                        while (!packsToWrite.isEmpty() && packsToWrite.peek().getPackageNumber() == lastWrittenPackID + 1) {
+                            fOutput.write(packsToWrite.remove().getData());
+                            ++lastWrittenPackID;
+                        }
                     }
                 } catch (IOException e) {
                     e.printStackTrace();

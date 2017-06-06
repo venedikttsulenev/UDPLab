@@ -1,8 +1,8 @@
 package commons;
 
-import java.io.Serializable;
+import java.io.*;
 
-public class InitialPackage implements Serializable {
+public class InitialPackage extends Package {
     public static final int ID = -1;
 
     public long getFileSize() {
@@ -22,6 +22,7 @@ public class InitialPackage implements Serializable {
     private final String fileName;
 
     public InitialPackage(String fileName, long fileSize, int packageSize) {
+        super(ID);
         this.fileName = fileName;
         this.fileSize = fileSize;
         this.packageSize = packageSize;
