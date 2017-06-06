@@ -15,19 +15,15 @@ public class CyclicBuffer<T> implements Iterable<T> {
     private class CyclicBufferIterator implements Iterator<T> {
         private int index = head;
 
-        private boolean has_next() {
+        @Override
+        public boolean hasNext() {
             return (tail > head && index >= head && index < tail)
                     || (tail < head && (index < tail || index >= head));
         }
 
         @Override
-        public boolean hasNext() {
-            return has_next();
-        }
-
-        @Override
         public T next() {
-            if (!has_next())
+            if (!hasNext())
                 throw new NoSuchElementException();
             final T r = elements[index];
             index = next_ind(index);
@@ -39,7 +35,9 @@ public class CyclicBuffer<T> implements Iterable<T> {
         this.elements = buf;
     }
 
-    public void put(T e) {
+    public void add(T e) {
+        if (next_ind(tail) == head)
+            throw new IllegalStateException();
         elements[tail] = e;
         tail = next_ind(tail);
     }

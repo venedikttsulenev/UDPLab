@@ -2,7 +2,6 @@ package client;
 
 import commons.*;
 import commons.Package;
-import sun.rmi.runtime.Log;
 
 import java.io.*;
 import java.net.DatagramPacket;
@@ -114,7 +113,7 @@ public class FileSender implements AcknowledgementReceiver.Listener, Runnable {
                     for (int i = slidingWindow.size(); packagesSent < totalPackages && i < slidingWindow.capacity(); ++i) {
                         try {
                             PartOfFilePackage p = new PartOfFilePackage(++packNum, inputChannel.take());
-                            slidingWindow.put(p);
+                            slidingWindow.add(p);
                             byte[] packBytes = p.getSerialized();
                             DatagramPacket packet = new DatagramPacket(packBytes, packBytes.length, receiverAddress);
                             socket.send(packet);
